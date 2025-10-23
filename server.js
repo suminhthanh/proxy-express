@@ -1,29 +1,19 @@
 const http = require('http');
 const fs = require('fs/promises');
-const { request } = require('undici'); // Sử dụng 'request' thay vì 'stream'
+const { request } = require('undici');
 const { marked } = require('marked');
 
 const PORT = process.env.PORT || 8080;
 
-// Hàm đọc toàn bộ body của một request đến
 function getRequestBody(req) {
     return new Promise((resolve, reject) => {
         const bodyChunks = [];
-        req.on('data', chunk => {
-            bodyChunks.push(chunk);
-        });
-        req.on('end', () => {
-            resolve(Buffer.concat(bodyChunks));
-        });
-        req.on('error', err => {
-            reject(err);
-        });
+        req.on('data', chunk => bodyChunks.push(chunk));
+        req.on('end', () => resolve(Buffer.concat(bodyChunks)));
+        req.on('error', err => reject(err));
     });
 }
 
-/**
- * Ghi log theo định dạng Nginx access log.
- */
 function accessLog(req, res, contentLength) {
     const clientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
     const date = new Date().toUTCString();
@@ -39,9 +29,6 @@ function accessLog(req, res, contentLength) {
     );
 }
 
-/**
- * Render trang hướng dẫn.
- */
 async function serveInstructions(res) {
     try {
         const markdown = await fs.readFile('README.md', 'utf8');
@@ -73,28 +60,20 @@ async function serveInstructions(res) {
     }
 }
 
-/**
- * Xử lý proxy request (phiên bản non-streaming).
- */
-async function handleProxy(req, res) {
-    const targetUrl = req.url.slice(1);
-
+async function handleProxy(req, res, targetUrl) {
     try {
         new URL(targetUrl);
     } catch (error) {
         res.writeHead(400, { 'Content-Type': 'text/plain' });
-        res.end('Invalid target URL provided.');
-        return 28;
+        res.end('Invalid target URL provided in "url" parameter.');
+        return 51;
     }
 
     const forwardedHeaders = { ...req.headers };
     delete forwardedHeaders.host;
 
     try {
-        // 1. Đệm toàn bộ request body từ client
         const requestBody = await getRequestBody(req);
-
-        // 2. Gửi request đã được đệm đến server đích
         const {
             statusCode,
             headers: responseHeaders,
@@ -105,17 +84,12 @@ async function handleProxy(req, res) {
             body: requestBody.length > 0 ? requestBody : null,
         });
 
-        // 3. Đệm toàn bộ response body từ server đích
-        const responseBody = await responseBodyStream.arrayBuffer();
-        const responseBuffer = Buffer.from(responseBody);
+        const responseBuffer = Buffer.from(await responseBodyStream.arrayBuffer());
         
-        // Dọn dẹp headers và set Content-Length chính xác
-        // delete responseHeaders['content-encoding'];
         delete responseHeaders['transfer-encoding'];
         delete responseHeaders['connection'];
         responseHeaders['content-length'] = responseBuffer.length;
 
-        // 4. Gửi response đã được đệm về cho client
         res.writeHead(statusCode, responseHeaders);
         res.end(responseBuffer);
 
@@ -133,18 +107,25 @@ async function handleProxy(req, res) {
 }
 
 const server = http.createServer(async (req, res) => {
+    // === THAY ĐỔI CHÍNH NẰM Ở ĐÂY ===
+    const requestUrl = new URL(req.url, `http://${req.headers.host}`);
+    let targetUrl = requestUrl.searchParams.get('url');
+
     let contentLength = 0;
     try {
-        if (req.url === '/') {
-            contentLength = await serveInstructions(res);
+        if (targetUrl) {
+            // Tự động thêm https:// nếu URL không có scheme
+            if (!/^https?:\/\//.test(targetUrl)) {
+                targetUrl = 'https://' + targetUrl;
+            }
+            contentLength = await handleProxy(req, res, targetUrl);
         } else {
-            contentLength = await handleProxy(req, res);
+            // Nếu không có param 'url', hiển thị trang hướng dẫn
+            contentLength = await serveInstructions(res);
         }
     } catch (error) {
         console.error("Unhandled error in request handler:", error);
-        if (!res.writableEnded) {
-            res.end();
-        }
+        if (!res.writableEnded) res.end();
     } finally {
         accessLog(req, res, contentLength);
     }
