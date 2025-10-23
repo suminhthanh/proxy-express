@@ -26,8 +26,7 @@ function accessLog(req, res, contentLength) {
 }
 
 /**
- * Render trang hướng dẫn và trả về độ dài nội dung.
- * @returns {Promise<number>} Độ dài nội dung HTML.
+ * Render trang hướng dẫn.
  */
 async function serveInstructions(res) {
     try {
@@ -62,21 +61,16 @@ async function serveInstructions(res) {
 }
 
 /**
- * Xử lý proxy request và trả về độ dài nội dung response.
- * @returns {Promise<number>} Độ dài nội dung response.
+ * Xử lý proxy request.
  */
-function handleProxy(req, res) {
-    // === SỬA LỖI LỚN: BỌC TOÀN BỘ LOGIC VÀO MỘT PROMISE ===
-    // Điều này đảm bảo chúng ta chỉ resolve khi stream đã kết thúc hoàn toàn.
+function handleProxy(req, res, targetUrl) {
     return new Promise((resolve, reject) => {
-        const targetUrl = req.url.slice(1);
-
         try {
             new URL(targetUrl);
         } catch (error) {
             res.writeHead(400, { 'Content-Type': 'text/plain' });
-            res.end('Invalid target URL provided.');
-            return resolve(28); // Trả về độ dài của chuỗi lỗi
+            res.end('Invalid target URL provided in the "url" query parameter.');
+            return resolve(58);
         }
 
         const forwardedHeaders = { ...req.headers };
@@ -95,31 +89,25 @@ function handleProxy(req, res) {
                 delete headers['content-encoding'];
                 delete headers['transfer-encoding'];
                 delete headers['connection'];
-
                 res.writeHead(statusCode, headers);
 
                 if (body) {
                     body.on('data', (chunk) => {
                         responseBodyLength += chunk.length;
                     });
-                    // pipeline trả về một promise, chúng ta chờ nó hoàn thành
                     pipeline(body, res)
                         .then(() => resolve(responseBodyLength))
                         .catch(err => {
                             console.error('Error during response pipeline:', err.message);
-                            // Nếu có lỗi khi đang stream, kết thúc response và reject promise
-                            if (!res.writableEnded) {
-                                res.end();
-                            }
+                            if (!res.writableEnded) res.end();
                             reject(err);
                         });
                 } else {
                     res.end();
-                    resolve(0); // Không có body, độ dài là 0
+                    resolve(0);
                 }
             }
         ).catch(err => {
-            // Bắt lỗi từ chính undici.stream (ví dụ: không thể kết nối)
             console.error('Proxy Error:', err.message);
             if (!res.headersSent) {
                 res.writeHead(502, { 'Content-Type': 'text/plain' });
@@ -127,37 +115,33 @@ function handleProxy(req, res) {
             } else if (!res.writableEnded) {
                 res.end();
             }
-            // Reject promise để khối catch bên ngoài có thể xử lý
             reject(err);
         });
     });
 }
 
-// === TÁI CẤU TRÚC SERVER ĐỂ XỬ LÝ LỖI VÀ LOGGING TỐT HƠN ===
 const server = http.createServer(async (req, res) => {
     let contentLength = 0;
+    const requestUrl = new URL(req.url, `http://${req.headers.host}`);
+    const targetUrl = requestUrl.searchParams.get('url');
+
     try {
-        if (req.url === '/') {
-            contentLength = await serveInstructions(res);
+        if (targetUrl) {
+            contentLength = await handleProxy(req, res, targetUrl);
         } else {
-            contentLength = await handleProxy(req, res);
+            contentLength = await serveInstructions(res);
         }
     } catch (error) {
-        // Bắt các lỗi đã bị reject từ handleProxy
         if (!res.writableEnded) {
             res.end();
         }
     } finally {
-        // Luôn ghi log sau khi mọi thứ đã kết thúc (thành công hoặc thất bại)
         accessLog(req, res, contentLength);
     }
 });
 
-
 server.listen(PORT, () => {
     console.log(`Server is listening on port ${PORT}`);
-    console.log('Serving instructions at http://localhost:8080/');
-    console.log('Proxy endpoint: http://localhost:8080/<full-target-url>');
 });
 
 process.on('SIGINT', () => {
