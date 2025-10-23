@@ -1,11 +1,25 @@
 const http = require('http');
-const { Readable } = require('stream');
-const { pipeline } = require('stream/promises');
 const fs = require('fs/promises');
-const { stream } = require('undici');
+const { request } = require('undici'); // Sử dụng 'request' thay vì 'stream'
 const { marked } = require('marked');
 
 const PORT = process.env.PORT || 8080;
+
+// Hàm đọc toàn bộ body của một request đến
+function getRequestBody(req) {
+    return new Promise((resolve, reject) => {
+        const bodyChunks = [];
+        req.on('data', chunk => {
+            bodyChunks.push(chunk);
+        });
+        req.on('end', () => {
+            resolve(Buffer.concat(bodyChunks));
+        });
+        req.on('error', err => {
+            reject(err);
+        });
+    });
+}
 
 /**
  * Ghi log theo định dạng Nginx access log.
@@ -37,7 +51,7 @@ async function serveInstructions(res) {
       <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>HTTP Streaming Forward Proxy</title>
+        <title>HTTP Forward Proxy</title>
         <style>
           body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; line-height: 1.6; margin: 2rem; max-width: 800px; margin: 2rem auto; }
           code { background-color: #f4f4f4; padding: 2px 4px; border-radius: 4px; }
@@ -53,7 +67,6 @@ async function serveInstructions(res) {
         res.end(html);
         return Buffer.byteLength(html);
     } catch (err) {
-        console.error("Could not read README.md", err);
         res.writeHead(500, { 'Content-Type': 'text/plain' });
         res.end('Internal Server Error');
         return 21;
@@ -61,77 +74,74 @@ async function serveInstructions(res) {
 }
 
 /**
- * Xử lý proxy request.
+ * Xử lý proxy request (phiên bản non-streaming).
  */
-function handleProxy(req, res, targetUrl) {
-    return new Promise((resolve, reject) => {
-        try {
-            new URL(targetUrl);
-        } catch (error) {
-            res.writeHead(400, { 'Content-Type': 'text/plain' });
-            res.end('Invalid target URL provided in the "url" query parameter.');
-            return resolve(58);
-        }
+async function handleProxy(req, res) {
+    const targetUrl = req.url.slice(1);
 
-        const forwardedHeaders = { ...req.headers };
-        delete forwardedHeaders.host;
+    try {
+        new URL(targetUrl);
+    } catch (error) {
+        res.writeHead(400, { 'Content-Type': 'text/plain' });
+        res.end('Invalid target URL provided.');
+        return 28;
+    }
 
-        let responseBodyLength = 0;
+    const forwardedHeaders = { ...req.headers };
+    delete forwardedHeaders.host;
 
-        stream(
-            targetUrl,
-            {
-                method: req.method,
-                headers: forwardedHeaders,
-                body: (req.method !== 'GET' && req.method !== 'HEAD') ? Readable.from(req) : null,
-            },
-            ({ statusCode, headers, body }) => {
-                delete headers['content-encoding'];
-                delete headers['transfer-encoding'];
-                delete headers['connection'];
-                res.writeHead(statusCode, headers);
+    try {
+        // 1. Đệm toàn bộ request body từ client
+        const requestBody = await getRequestBody(req);
 
-                if (body) {
-                    body.on('data', (chunk) => {
-                        responseBodyLength += chunk.length;
-                    });
-                    pipeline(body, res)
-                        .then(() => resolve(responseBodyLength))
-                        .catch(err => {
-                            console.error('Error during response pipeline:', err.message);
-                            if (!res.writableEnded) res.end();
-                            reject(err);
-                        });
-                } else {
-                    res.end();
-                    resolve(0);
-                }
-            }
-        ).catch(err => {
-            console.error('Proxy Error:', err.message);
-            if (!res.headersSent) {
-                res.writeHead(502, { 'Content-Type': 'text/plain' });
-                res.end(`Bad Gateway: ${err.message}`);
-            } else if (!res.writableEnded) {
-                res.end();
-            }
-            reject(err);
+        // 2. Gửi request đã được đệm đến server đích
+        const {
+            statusCode,
+            headers: responseHeaders,
+            body: responseBodyStream
+        } = await request(targetUrl, {
+            method: req.method,
+            headers: forwardedHeaders,
+            body: requestBody.length > 0 ? requestBody : null,
         });
-    });
+
+        // 3. Đệm toàn bộ response body từ server đích
+        const responseBody = await responseBodyStream.arrayBuffer();
+        const responseBuffer = Buffer.from(responseBody);
+        
+        // Dọn dẹp headers và set Content-Length chính xác
+        delete responseHeaders['content-encoding'];
+        delete responseHeaders['transfer-encoding'];
+        delete responseHeaders['connection'];
+        responseHeaders['content-length'] = responseBuffer.length;
+
+        // 4. Gửi response đã được đệm về cho client
+        res.writeHead(statusCode, responseHeaders);
+        res.end(responseBuffer);
+
+        return responseBuffer.length;
+    } catch (err) {
+        console.error('Proxy Error:', err.message);
+        if (!res.headersSent) {
+            res.writeHead(502, { 'Content-Type': 'text/plain' });
+            res.end(`Bad Gateway: ${err.message}`);
+        } else {
+            res.end();
+        }
+        return 0;
+    }
 }
 
 const server = http.createServer(async (req, res) => {
     let contentLength = 0;
-    const requestUrl = new URL(req.url, `http://${req.headers.host}`);
-    const targetUrl = requestUrl.searchParams.get('url');
-
     try {
-        if (targetUrl) {
-            contentLength = await handleProxy(req, res, targetUrl);
-        } else {
+        if (req.url === '/') {
             contentLength = await serveInstructions(res);
+        } else {
+            contentLength = await handleProxy(req, res);
         }
     } catch (error) {
+        console.error("Unhandled error in request handler:", error);
         if (!res.writableEnded) {
             res.end();
         }
