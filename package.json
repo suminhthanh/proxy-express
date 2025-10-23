@@ -1,0 +1,15 @@
+{
+  "name": "http-streaming-forward-proxy",
+  "version": "1.0.0",
+  "description": "A single-container HTTP Streaming Forward Proxy in Node.js",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "marked": "^12.0.0",
+    "undici": "^5.28.2"
+  },
+  "author": "",
+  "license": "ISC"
+}
