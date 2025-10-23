@@ -1,51 +1,83 @@
 const express = require("express");
 const { request } = require("undici");
 const morgan = require("morgan");
+const showdown = require("showdown");
 
 const app = express();
+const md = new showdown.Converter();
 
-// ✅ Logging đẹp kiểu Nginx
+// ✅ Logging dạng Nginx
 morgan.token("remote-addr", (req) => req.headers["x-forwarded-for"] || req.ip);
 morgan.token("target", (req) => req.originalUrl.slice(1));
 app.use(
   morgan(':remote-addr - [:date[iso]] ":method :url" -> ":target" :status :response-time ms ":user-agent"')
 );
 
-// ✅ Không dùng body-parser → giữ nguyên streaming body
+// ✅ Trang / Hello Markdown Guide
+app.get("/", (req, res) => {
+  const markdown = `
+# 🌐 HTTP Streaming Forward Proxy
+
+Forward mọi request từ **A → B** (giữ nguyên headers, body, method)
+
+---
+
+## ✅ Cách sử dụng
+
+Chỉ cần truyền URL target sau dấu "/":
+
+\`\`\`
+http://<proxy-host>/https://senlyzer.com/webhook
+\`\`\`
+
+Hỗ trợ:
+- GET / POST / PUT / PATCH / DELETE
+- JSON / Form-data / File upload
+- Streaming download (video / file lớn)
+- Forward status code & headers
+
+---
+
+## 🔥 Ví dụ
+
+\`\`\`
+curl -X POST http://<proxy>/https://httpbin.org/post \\
+  -H "Content-Type: application/json" \\
+  -d '{"hello": "world"}'
+\`\`\`
+`;
+  res.setHeader("Content-Type", "text/html");
+  res.send(md.makeHtml(markdown));
+});
+
+// ✅ Không parse body → giữ nguyên streaming
 app.use((req, res, next) => {
   req.setEncoding(null);
   next();
 });
 
-app.all("/*", async (req, res) => {
-  const target = req.originalUrl.slice(1); // Bỏ dấu "/"
+// ✅ Catch-all forwarder (phải đứng cuối!)
+app.use(async (req, res) => {
+  const target = req.originalUrl.slice(1);
 
   if (!target.startsWith("http://") && !target.startsWith("https://")) {
-    return res.status(400).send("Invalid target URL");
+    return res.redirect("/");
   }
 
-  console.log(`🚀 Stream Forward → ${target}`);
+  console.log(`🚀 Streaming Forward → ${target}`);
 
   try {
     const upstream = await request(target, {
       method: req.method,
-      headers: {
-        ...req.headers,
-        host: undefined, // tránh override host
-      },
+      headers: { ...req.headers, host: undefined },
       body: req,
       throwOnError: false,
     });
 
-    // ✅ Forward status + headers từ server đích về client
     res.status(upstream.statusCode);
     for (const [key, value] of Object.entries(upstream.headers)) {
-      try {
-        res.setHeader(key, value);
-      } catch {}
+      try { res.setHeader(key, value); } catch {}
     }
-
-    // ✅ Streaming response trực tiếp
     upstream.body.pipe(res);
   } catch (err) {
     console.error("❌ Proxy Error:", err.message);
@@ -54,5 +86,5 @@ app.all("/*", async (req, res) => {
 });
 
 app.listen(80, () =>
-  console.log("✅ Streaming Forwarder running on port 80")
+  console.log("✅ Streaming Forward Proxy is running on port 80")
 );

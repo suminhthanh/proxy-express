@@ -3,7 +3,7 @@ FROM node:18-alpine
 WORKDIR /app
 
 RUN npm init -y && \
-    npm install express undici morgan
+    npm install express undici morgan showdown
 
 COPY server.js .
 
