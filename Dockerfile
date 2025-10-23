@@ -1,14 +1,10 @@
-# -------------------------------
-# ALL-IN-ONE REQUEST FORWARDER
-# -------------------------------
 FROM node:18-alpine
 
 WORKDIR /app
 
-# Cài đặt dependencies tối thiểu
-RUN npm init -y && npm install express axios
+RUN npm init -y && \
+    npm install express undici morgan
 
-# Copy source code
 COPY server.js .
 
 EXPOSE 80

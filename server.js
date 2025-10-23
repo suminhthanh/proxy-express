@@ -1,44 +1,58 @@
-import express from "express";
-import axios from "axios";
+const express = require("express");
+const { request } = require("undici");
+const morgan = require("morgan");
 
 const app = express();
 
-// Dùng raw body để đảm bảo không mất dữ liệu
-app.use(express.raw({ type: "*/*", limit: "50mb" }));
+// ✅ Logging đẹp kiểu Nginx
+morgan.token("remote-addr", (req) => req.headers["x-forwarded-for"] || req.ip);
+morgan.token("target", (req) => req.originalUrl.slice(1));
+app.use(
+  morgan(':remote-addr - [:date[iso]] ":method :url" -> ":target" :status :response-time ms ":user-agent"')
+);
+
+// ✅ Không dùng body-parser → giữ nguyên streaming body
+app.use((req, res, next) => {
+  req.setEncoding(null);
+  next();
+});
 
 app.all("/*", async (req, res) => {
+  const target = req.originalUrl.slice(1); // Bỏ dấu "/"
+
+  if (!target.startsWith("http://") && !target.startsWith("https://")) {
+    return res.status(400).send("Invalid target URL");
+  }
+
+  console.log(`🚀 Stream Forward → ${target}`);
+
   try {
-    // Lấy path sau domain, ví dụ: /https://senlyzer.com/webhook-test/abc/xyz
-    const target = req.originalUrl.slice(1); // Bỏ dấu "/"
-
-    if (!target.startsWith("http://") && !target.startsWith("https://")) {
-      return res.status(400).send("Invalid target URL");
-    }
-
-    console.log(`Forwarding → ${target}`);
-
-    // Forward toàn bộ
-    const response = await axios({
-      url: target,
+    const upstream = await request(target, {
       method: req.method,
       headers: {
         ...req.headers,
-        host: undefined, // tránh overwrite
+        host: undefined, // tránh override host
       },
-      data: req.body.length ? req.body : undefined,
-      validateStatus: () => true, // tránh lỗi do status code khác 2xx
+      body: req,
+      throwOnError: false,
     });
 
-    // Forward lại response từ server đích
-    res.status(response.status);
-    for (const [key, value] of Object.entries(response.headers)) {
-      res.setHeader(key, value);
+    // ✅ Forward status + headers từ server đích về client
+    res.status(upstream.statusCode);
+    for (const [key, value] of Object.entries(upstream.headers)) {
+      try {
+        res.setHeader(key, value);
+      } catch {}
     }
-    res.send(response.data);
+
+    // ✅ Streaming response trực tiếp
+    upstream.body.pipe(res);
   } catch (err) {
-    console.error(err.message);
+    console.error("❌ Proxy Error:", err.message);
     res.status(500).send("Forward failed: " + err.message);
   }
 });
 
-app.listen(80, () => console.log("🚀 Forwarder listening on port 80"));
+app.listen(80, () =>
+  console.log("✅ Streaming Forwarder running on port 80")
+);
