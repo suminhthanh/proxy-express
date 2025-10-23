@@ -2,7 +2,7 @@ const http = require('http');
 const { Readable } = require('stream');
 const { pipeline } = require('stream/promises');
 const fs = require('fs');
-const { stream, getGlobalDispatcher } = require('undici');
+const { stream } = require('undici');
 const { marked } = require('marked');
 
 const PORT = process.env.PORT || 8080;
@@ -37,7 +37,7 @@ function serveInstructions(res) {
         if (err) {
             res.writeHead(500, { 'Content-Type': 'text/plain' });
             res.end('Internal Server Error: Could not read README.md');
-            accessLog({ url: '/', method: 'GET', headers: {}, socket: { remoteAddress: 'unknown' } }, res, 0);
+            accessLog({ url: '/', method: 'GET', headers: {}, socket: { remoteAddress: 'unknown' }, httpVersion: '1.1' }, res, 0);
             return;
         }
         const html = `
@@ -60,7 +60,7 @@ function serveInstructions(res) {
     `;
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
         res.end(html);
-        accessLog({ url: '/', method: 'GET', headers: {}, socket: { remoteAddress: 'unknown' } }, res, Buffer.byteLength(html));
+        accessLog({ url: '/', method: 'GET', headers: {}, socket: { remoteAddress: 'unknown' }, httpVersion: '1.1' }, res, Buffer.byteLength(html));
     });
 }
 
@@ -70,19 +70,17 @@ function serveInstructions(res) {
  * @param {http.ServerResponse} res - Đối tượng response.
  */
 async function handleProxy(req, res) {
-    const targetUrl = req.url.slice(1); // Bỏ dấu "/" ở đầu
+    const targetUrl = req.url.slice(1);
 
-    // Kiểm tra URL hợp lệ
     try {
         new URL(targetUrl);
     } catch (error) {
         res.writeHead(400, { 'Content-Type': 'text/plain' });
         res.end('Invalid target URL provided.');
-        accessLog(req, res, 0);
+        accessLog(req, res, 28);
         return;
     }
 
-    // Sao chép headers, loại bỏ header "host" để undici tự động thiết lập
     const forwardedHeaders = { ...req.headers };
     delete forwardedHeaders.host;
 
@@ -94,23 +92,27 @@ async function handleProxy(req, res) {
             {
                 method: req.method,
                 headers: forwardedHeaders,
-                body: Readable.from(req), // Truyền streaming body của request
-                opaque: { res, req }, // Truyền response và request gốc vào opaque để sử dụng trong callback
+                body: (req.method !== 'GET' && req.method !== 'HEAD') ? Readable.from(req) : null,
+                opaque: { res, req },
             },
             ({ statusCode, headers, body }) => {
-                // Xóa các header liên quan đến compression và chunking để tránh xung đột
                 delete headers['content-encoding'];
                 delete headers['transfer-encoding'];
                 delete headers['connection'];
 
                 res.writeHead(statusCode, headers);
-
-                // Đếm kích thước response body
-                body.on('data', (chunk) => {
-                    responseBodyLength += chunk.length;
-                });
-
-                return pipeline(body, res);
+                
+                // === SỬA LỖI TẠI ĐÂY ===
+                // Kiểm tra nếu response từ server đích có body thì mới pipeline
+                if (body) {
+                    body.on('data', (chunk) => {
+                        responseBodyLength += chunk.length;
+                    });
+                    return pipeline(body, res);
+                } else {
+                    // Nếu không có body (ví dụ 204 No Content), chỉ cần kết thúc response
+                    res.end();
+                }
             }
         );
     } catch (error) {
@@ -118,13 +120,16 @@ async function handleProxy(req, res) {
         if (!res.headersSent) {
             res.writeHead(502, { 'Content-Type': 'text/plain' });
             res.end(`Bad Gateway: ${error.message}`);
+        } else {
+            // Nếu header đã được gửi, có thể stream đã bị lỗi giữa chừng
+            res.end();
         }
     } finally {
+        // Luôn ghi log sau khi request kết thúc
         accessLog(req, res, responseBodyLength);
     }
 }
 
-// Tạo HTTP server
 const server = http.createServer((req, res) => {
     if (req.url === '/') {
         serveInstructions(res);
@@ -139,7 +144,6 @@ server.listen(PORT, () => {
     console.log('Proxy endpoint: http://localhost:8080/<full-target-url>');
 });
 
-// Xử lý graceful shutdown
 process.on('SIGINT', () => {
     console.log('Shutting down server...');
     server.close(() => {
