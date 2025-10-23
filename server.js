@@ -110,7 +110,7 @@ async function handleProxy(req, res) {
         const responseBuffer = Buffer.from(responseBody);
         
         // Dọn dẹp headers và set Content-Length chính xác
-        delete responseHeaders['content-encoding'];
+        // delete responseHeaders['content-encoding'];
         delete responseHeaders['transfer-encoding'];
         delete responseHeaders['connection'];
         responseHeaders['content-length'] = responseBuffer.length;
